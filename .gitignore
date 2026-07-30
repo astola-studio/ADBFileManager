@@ -1,0 +1,19 @@
+# Visual Studio / MSBuild build output
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# IDE / Editor configuration
+.vs/
+.idea/
+*.user
+*.suo
+*.userosv
+*.sln.docstates
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
