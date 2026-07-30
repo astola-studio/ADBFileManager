@@ -1,0 +1,41 @@
+name: Build & Release ADB File Manager
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build & Artifact Generation
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build Solution (Release)
+      run: msbuild ADBFileManager.csproj /p:Configuration=Release /p:Platform="Any CPU" /out:ADBFileManager.exe
+
+    - name: Upload Executable Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ADBFileManager-exe
+        path: ADBFileManager.exe
+
+    - name: Create GitHub Release (On Release Tag)
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ADBFileManager.exe
+        name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
