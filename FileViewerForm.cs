@@ -64,9 +64,16 @@ namespace ADBFileManager
             this.Controls.Add(this.lblHeader);
             this.StartPosition = FormStartPosition.CenterParent;
             
-            if (System.IO.File.Exists("icon.ico"))
+            try
             {
-                try { this.Icon = new Icon("icon.ico"); } catch { }
+                this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            }
+            catch
+            {
+                if (System.IO.File.Exists("icon.ico"))
+                {
+                    try { this.Icon = new Icon("icon.ico"); } catch { }
+                }
             }
             this.AcceptButton = this.btnClose;
 
