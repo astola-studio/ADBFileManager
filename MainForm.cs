@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -53,6 +55,20 @@ namespace ADBFileManager
             public bool IsCut { get; set; }
         }
         private AdbClipboardData internalClipboard = null;
+
+        private class TransferItem
+        {
+            public string LocalPath { get; set; }
+            public string TargetDir { get; set; }
+            public string Serial { get; set; }
+            public string ItemName { get; set; }
+        }
+
+        private readonly ConcurrentQueue<TransferItem> uploadQueue = new ConcurrentQueue<TransferItem>();
+        private readonly SemaphoreSlim queueSemaphore = new SemaphoreSlim(1, 1);
+        private int queuedTotalCount = 0;
+        private int queuedProcessedCount = 0;
+        private ConflictResult queueConflictState = ConflictResult.Overwrite;
 
         private SplitContainer splitContainer;
         private ListBox lstQuickLinks;
@@ -774,73 +790,122 @@ namespace ADBFileManager
         {
             if (string.IsNullOrEmpty(currentDeviceSerial)) return;
 
-            string serial = currentDeviceSerial;
             var pathList = localPaths.Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
             if (pathList.Count == 0) return;
 
-            int totalItems = pathList.Count;
-            int successCount = 0;
-            ConflictResult conflictState = ConflictResult.Overwrite;
+            string serial = currentDeviceSerial;
 
-            for (int i = 0; i < totalItems; i++)
+            foreach (string localPath in pathList)
             {
-                string localPath = pathList[i];
                 string itemName = Path.GetFileName(localPath);
                 if (string.IsNullOrEmpty(itemName)) itemName = localPath;
 
-                string remoteTarget = AdbService.CombinePath(targetDir, itemName);
-
-                bool existsRemote = await Task.Run(delegate() { return adbService.FileExistsRemote(serial, remoteTarget); });
-
-                if (existsRemote)
+                uploadQueue.Enqueue(new TransferItem
                 {
-                    if (conflictState == ConflictResult.SkipAll) continue;
-                    if (conflictState != ConflictResult.OverwriteAll)
+                    LocalPath = localPath,
+                    TargetDir = targetDir,
+                    Serial = serial,
+                    ItemName = itemName
+                });
+            }
+
+            queuedTotalCount += pathList.Count;
+            SetProgress(-1, string.Format("Queued {0} item(s) for upload... (Queue: {1})", pathList.Count, uploadQueue.Count));
+
+            await ProcessUploadQueueAsync();
+        }
+
+        private async Task ProcessUploadQueueAsync()
+        {
+            if (!await queueSemaphore.WaitAsync(0))
+            {
+                return;
+            }
+
+            int sessionSuccessCount = 0;
+            TransferItem item;
+
+            try
+            {
+                while (uploadQueue.TryDequeue(out item))
+                {
+                    if (string.IsNullOrEmpty(currentDeviceSerial) || item.Serial != currentDeviceSerial)
                     {
-                        using (var dlg = new ConflictDialog(itemName, targetDir, true))
+                        continue;
+                    }
+
+                    queuedProcessedCount++;
+                    int currentItemIdx = queuedProcessedCount;
+
+                    string remoteTarget = AdbService.CombinePath(item.TargetDir, item.ItemName);
+
+                    string serial = item.Serial;
+                    bool existsRemote = await Task.Run(delegate() { return adbService.FileExistsRemote(serial, remoteTarget); });
+
+                    if (existsRemote)
+                    {
+                        if (queueConflictState == ConflictResult.SkipAll) continue;
+                        if (queueConflictState != ConflictResult.OverwriteAll)
                         {
-                            if (dlg.ShowDialog(this) != DialogResult.OK || dlg.SelectedResult == ConflictResult.Cancel)
+                            using (var dlg = new ConflictDialog(item.ItemName, item.TargetDir, true))
                             {
-                                break;
-                            }
-                            if (dlg.SelectedResult == ConflictResult.Skip) continue;
-                            if (dlg.SelectedResult == ConflictResult.SkipAll)
-                            {
-                                conflictState = ConflictResult.SkipAll;
-                                continue;
-                            }
-                            if (dlg.SelectedResult == ConflictResult.OverwriteAll)
-                            {
-                                conflictState = ConflictResult.OverwriteAll;
+                                if (dlg.ShowDialog(this) != DialogResult.OK || dlg.SelectedResult == ConflictResult.Cancel)
+                                {
+                                    TransferItem discardItem;
+                                    while (uploadQueue.TryDequeue(out discardItem)) { }
+                                    break;
+                                }
+                                if (dlg.SelectedResult == ConflictResult.Skip) continue;
+                                if (dlg.SelectedResult == ConflictResult.SkipAll)
+                                {
+                                    queueConflictState = ConflictResult.SkipAll;
+                                    continue;
+                                }
+                                if (dlg.SelectedResult == ConflictResult.OverwriteAll)
+                                {
+                                    queueConflictState = ConflictResult.OverwriteAll;
+                                }
                             }
                         }
                     }
-                }
 
-                int itemIdx = i;
-                SetProgress((itemIdx * 100) / totalItems, string.Format("Uploading ({0}/{1}): {2}...", itemIdx + 1, totalItems, itemName));
+                    int totalNow = queuedTotalCount > 0 ? queuedTotalCount : 1;
+                    SetProgress(((currentItemIdx - 1) * 100) / totalNow, string.Format("Uploading ({0}/{1}): {2}...", currentItemIdx, totalNow, item.ItemName));
 
-                var res = await Task.Run(delegate()
-                {
-                    return adbService.Push(serial, localPath, targetDir, delegate(int pct, string line)
+                    var res = await Task.Run(delegate()
                     {
-                        int totalPct = ((itemIdx * 100) + pct) / totalItems;
-                        SetProgress(totalPct, string.Format("Uploading ({0}/{1}): {2} [{3}%]", itemIdx + 1, totalItems, itemName, pct));
+                        return adbService.Push(serial, item.LocalPath, item.TargetDir, delegate(int pct, string line)
+                        {
+                            int currentTotal = queuedTotalCount > 0 ? queuedTotalCount : 1;
+                            int totalPct = ((((currentItemIdx - 1) * 100) + pct)) / currentTotal;
+                            SetProgress(totalPct, string.Format("Uploading ({0}/{1}): {2} [{3}%]", currentItemIdx, currentTotal, item.ItemName, pct));
+                        });
                     });
-                });
 
-                if (res.ExitCode == 0)
-                {
-                    successCount++;
+                    if (res.ExitCode == 0)
+                    {
+                        sessionSuccessCount++;
+                    }
+                    else
+                    {
+                        MessageBox.Show(string.Format("Failed to upload '{0}':\n{1}", item.ItemName, res.Error), "Upload Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
-                else
-                {
-                    MessageBox.Show(string.Format("Failed to upload '{0}':\n{1}", itemName, res.Error), "Upload Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+
+                SetProgress(-1, string.Format("Successfully uploaded {0} item(s)", sessionSuccessCount));
+                await LoadCurrentDirectoryAsync();
             }
+            finally
+            {
+                if (uploadQueue.IsEmpty)
+                {
+                    queuedTotalCount = 0;
+                    queuedProcessedCount = 0;
+                    queueConflictState = ConflictResult.Overwrite;
+                }
 
-            SetProgress(-1, string.Format("Successfully uploaded {0} item(s) to {1}", successCount, targetDir));
-            await LoadCurrentDirectoryAsync();
+                queueSemaphore.Release();
+            }
         }
 
         private async Task CreateNewFolderAsync()

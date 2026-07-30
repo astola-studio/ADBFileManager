@@ -23,6 +23,7 @@ Built with **C# (.NET Framework / WinForms)**, it compiles using either standard
   - Full right-click context menu (Navigate, Download to PC, Upload File/Folder, Preview Text, New Folder, Rename, Delete, Copy Remote Path).
 - **🚀 File Transfers & Drag-and-Drop**:
   - Drag and drop files/folders from Windows Explorer straight into the device view.
+  - Thread-safe FIFO transfer queue for sequential uploads and dynamic real-time progress updates.
   - Progress bar and progress percentage indicator for `adb push` and `adb pull`.
   - Smart collision handling modal dialog (**Overwrite**, **Overwrite All**, **Skip**, **Skip All**, **Cancel**).
 - **👁️ Text File Preview**: Modal viewer with monospaced font for inspecting configuration files or logs directly on the device.
@@ -33,7 +34,8 @@ Built with **C# (.NET Framework / WinForms)**, it compiles using either standard
 
 - **OS**: Windows 7 / 8 / 10 / 11
 - **ADB**: Android SDK Platform-Tools (`adb.exe` in PATH or working directory).
-- **Compiler** *(optional for source build)*: Built-in Windows C# compiler (`csc.exe`) included with Windows .NET Framework 4.0+.
+
+- **Compiler** *(optional for source build only)*: Built-in Windows C# compiler (`csc.exe`) included with Windows .NET Framework 4.0+.
 
 ---
 
