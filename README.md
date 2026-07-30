@@ -56,13 +56,7 @@ msbuild ADBFileManager.csproj /p:Configuration=Release
 
 ## 🤝 Contributing
 
-Contributions are very welcome! Whether you are reporting bugs, suggesting new features, improving documentation, or submitting code improvements:
-
-1. **Fork the Repository** on GitHub.
-2. **Create your Feature Branch** (`git checkout -b feature/AmazingFeature`).
-3. **Commit your changes** (`git commit -m 'Add some AmazingFeature'`).
-4. **Push to the branch** (`git push origin feature/AmazingFeature`).
-5. **Open a Pull Request** for maintainer review.
+Contributions are very welcome! Whether you are reporting bugs, suggesting new features, improving documentation, or submitting code improvements.
 
 All submissions and pull requests are reviewed by maintainers before merging into `main`.
 
