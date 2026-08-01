@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -61,7 +63,7 @@ namespace ADBFileManager
             AdbPath = string.IsNullOrEmpty(adbPath) ? "adb" : adbPath;
         }
 
-        private ExecutionResult RunAdbCommand(string args, Action<int, string> progressCallback = null, int timeoutMs = 300000)
+        public ExecutionResult RunAdbCommand(string args, Action<int, string> progressCallback = null, int timeoutMs = 300000)
         {
             var result = new ExecutionResult();
             try
@@ -472,7 +474,225 @@ namespace ADBFileManager
             if (parent == "/") return "/" + child;
             return parent + "/" + child;
         }
+
+        private static readonly string[] StandardAbis = new[] { "mips64", "mips", "x86_64", "x86", "arm64-v8a", "armeabi-v7a", "armeabi" };
+
+        public string[] GetDeviceAbis(string serial)
+        {
+            var res = RunAdbCommand(string.Format("-s \"{0}\" shell \"getprop ro.product.cpu.abilist\"", serial));
+            if (res.ExitCode == 0 && !string.IsNullOrEmpty(res.Output))
+            {
+                return res.Output.Trim().Split(new[] { ',', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            }
+            return new string[0];
+        }
+
+        public static List<string> GetApkAbis(string apkPath)
+        {
+            var abis = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (FileStream fs = File.OpenRead(apkPath))
+                using (ZipArchive zip = new ZipArchive(fs, ZipArchiveMode.Read))
+                {
+                    foreach (ZipArchiveEntry entry in zip.Entries)
+                    {
+                        string path = entry.FullName.Replace('\\', '/');
+                        if (path.StartsWith("lib/", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string[] parts = path.Split('/');
+                            if (parts.Length >= 3)
+                            {
+                                abis.Add(parts[1]);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return new List<string>(abis);
+        }
+
+        private static bool ContainsAny(string[] list, string text)
+        {
+            if (list == null || string.IsNullOrEmpty(text)) return false;
+            foreach (var s in list)
+            {
+                if (text.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        public ExecutionResult InstallPackage(string serial, string localPath, Action<int, string> progressCallback = null)
+        {
+            if (string.IsNullOrEmpty(localPath) || !File.Exists(localPath))
+            {
+                return new ExecutionResult { ExitCode = -1, Error = "File does not exist: " + localPath };
+            }
+
+            string ext = Path.GetExtension(localPath).ToLowerInvariant();
+            var validExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".apk", ".xapk", ".apks", ".apkm", ".xapks" };
+
+            if (!validExts.Contains(ext))
+            {
+                return new ExecutionResult { ExitCode = -1, Error = "Unsupported package format: " + ext };
+            }
+
+            string[] deviceAbis = GetDeviceAbis(serial);
+
+            if (ext == ".apk")
+            {
+                if (deviceAbis.Length > 0)
+                {
+                    var apkAbis = GetApkAbis(localPath);
+                    if (apkAbis.Count > 0)
+                    {
+                        bool abiFound = false;
+                        foreach (var abi in apkAbis)
+                        {
+                            if (ContainsAny(deviceAbis, abi))
+                            {
+                                abiFound = true;
+                                break;
+                            }
+                        }
+                        if (!abiFound)
+                        {
+                            return new ExecutionResult
+                            {
+                                ExitCode = -1,
+                                Error = string.Format("APK Architecture Not Supported!\nAPK ABIs: {0}\nDevice ABIs: {1}", string.Join(", ", apkAbis.ToArray()), string.Join(", ", deviceAbis))
+                            };
+                        }
+                    }
+                }
+
+                if (progressCallback != null) progressCallback(10, "Installing APK...");
+                var res = RunAdbCommand(string.Format("-s \"{0}\" install -r \"{1}\"", serial, localPath), progressCallback, 600000);
+                if (res.ExitCode == 0 && (res.Output.Contains("Failure") || (res.Error != null && res.Error.Contains("Failure"))))
+                {
+                    res.ExitCode = -1;
+                    if (string.IsNullOrEmpty(res.Error)) res.Error = res.Output;
+                }
+                return res;
+            }
+            else
+            {
+                string tempDir = Path.Combine(Path.GetTempPath(), "xapk_extract_" + DateTime.Now.ToFileTime());
+                try
+                {
+                    Directory.CreateDirectory(tempDir);
+                    if (progressCallback != null) progressCallback(10, "Extracting package archive...");
+
+                    ZipFile.ExtractToDirectory(localPath, tempDir);
+
+                    var apkFiles = Directory.GetFiles(tempDir, "*.apk", SearchOption.AllDirectories);
+                    if (apkFiles.Length == 0)
+                    {
+                        return new ExecutionResult { ExitCode = -1, Error = "No .apk files found inside package archive." };
+                    }
+
+                    if (deviceAbis.Length > 0)
+                    {
+                        bool abiRequired = false;
+                        bool abiFound = false;
+
+                        foreach (var f in apkFiles)
+                        {
+                            var fn = Path.GetFileName(f).Replace('_', '-').ToLowerInvariant();
+                            if (ContainsAny(StandardAbis, fn))
+                            {
+                                abiRequired = true;
+                                if (ContainsAny(deviceAbis, fn))
+                                {
+                                    abiFound = true;
+                                    break;
+                                }
+                            }
+
+                            var apkAbis = GetApkAbis(f);
+                            if (apkAbis.Count > 0)
+                            {
+                                abiRequired = true;
+                                foreach (var abi in apkAbis)
+                                {
+                                    if (ContainsAny(deviceAbis, abi))
+                                    {
+                                        abiFound = true;
+                                        break;
+                                    }
+                                }
+                                if (abiFound) break;
+                            }
+                        }
+
+                        if (abiRequired && !abiFound)
+                        {
+                            return new ExecutionResult
+                            {
+                                ExitCode = -1,
+                                Error = string.Format("Package Architecture Not Supported by Device!\nDevice ABIs: {0}", string.Join(", ", deviceAbis))
+                            };
+                        }
+                    }
+
+                    if (progressCallback != null) progressCallback(40, "Installing application package(s)...");
+
+                    ExecutionResult res;
+                    if (apkFiles.Length == 1)
+                    {
+                        res = RunAdbCommand(string.Format("-s \"{0}\" install -r \"{1}\"", serial, apkFiles[0]), progressCallback, 600000);
+                    }
+                    else
+                    {
+                        var sbArgs = new StringBuilder();
+                        sbArgs.AppendFormat("-s \"{0}\" install-multiple -r", serial);
+                        foreach (var apk in apkFiles)
+                        {
+                            sbArgs.AppendFormat(" \"{0}\"", apk);
+                        }
+                        res = RunAdbCommand(sbArgs.ToString(), progressCallback, 600000);
+                    }
+
+                    if (res.ExitCode == 0 && (res.Output.Contains("Failure") || (res.Error != null && res.Error.Contains("Failure"))))
+                    {
+                        res.ExitCode = -1;
+                        if (string.IsNullOrEmpty(res.Error)) res.Error = res.Output;
+                        return res;
+                    }
+
+                    // Push root extracted directories (e.g. Android/obb, assets) to /sdcard/
+                    var subDirs = Directory.GetDirectories(tempDir);
+                    if (subDirs.Length > 0)
+                    {
+                        if (progressCallback != null) progressCallback(80, "Pushing expansion data folders to device...");
+                        foreach (var subDir in subDirs)
+                        {
+                            Push(serial, subDir, "/sdcard/", progressCallback);
+                        }
+                    }
+
+                    return res;
+                }
+                catch (Exception ex)
+                {
+                    return new ExecutionResult { ExitCode = -1, Error = "Extraction/installation failed: " + ex.Message };
+                }
+                finally
+                {
+                    try
+                    {
+                        if (Directory.Exists(tempDir))
+                        {
+                            Directory.Delete(tempDir, true);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
     }
+
 
     public class StorageInfo
     {

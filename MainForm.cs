@@ -48,6 +48,7 @@ namespace ADBFileManager
         private ToolStripMenuItem menuCopy;
         private ToolStripMenuItem menuCut;
         private ToolStripMenuItem menuPaste;
+        private ToolStripMenuItem menuInstallApk;
 
         private class AdbClipboardData
         {
@@ -281,10 +282,12 @@ namespace ADBFileManager
             menuCut = new ToolStripMenuItem("Cut (Ctrl+X)", null, (s, e) => CopySelectedToClipboard(true));
             menuCopy = new ToolStripMenuItem("Copy (Ctrl+C)", null, (s, e) => CopySelectedToClipboard(false));
             menuPaste = new ToolStripMenuItem("Paste (Ctrl+V)", null, async (s, e) => await PasteClipboardAsync()) { Enabled = false };
+            menuInstallApk = new ToolStripMenuItem("📦 Install Package on Device", null, async (s, e) => await InstallSelectedRemoteApkAsync()) { Visible = false };
 
             contextMenuFiles.Items.Add(menuCut);
             contextMenuFiles.Items.Add(menuCopy);
             contextMenuFiles.Items.Add(menuPaste);
+            contextMenuFiles.Items.Add(menuInstallApk);
             contextMenuFiles.Items.Add(new ToolStripSeparator());
             contextMenuFiles.Items.Add("Download to PC...", null, async (s, e) => await DownloadSelectedAsync());
             contextMenuFiles.Items.Add("Upload File Here...", null, async (s, e) => await UploadFileAsync());
@@ -306,6 +309,21 @@ namespace ADBFileManager
                 menuPaste.Enabled = hasClipboard;
                 btnCopy.Enabled = hasSelection;
                 btnCut.Enabled = hasSelection;
+
+                bool isApkSelected = false;
+                if (lstFiles.SelectedItems.Count == 1)
+                {
+                    var info = lstFiles.SelectedItems[0].Tag as AdbFileInfo;
+                    if (info != null && !info.IsDirectory)
+                    {
+                        string ext = Path.GetExtension(info.Name).ToLowerInvariant();
+                        if (ext == ".apk" || ext == ".xapk" || ext == ".apks" || ext == ".apkm" || ext == ".xapks")
+                        {
+                            isApkSelected = true;
+                        }
+                    }
+                }
+                menuInstallApk.Visible = isApkSelected;
             };
 
             lstFiles.ContextMenuStrip = contextMenuFiles;
@@ -594,6 +612,21 @@ namespace ADBFileManager
             }
             else
             {
+                string ext = Path.GetExtension(item.Name).ToLowerInvariant();
+                if (ext == ".apk" || ext == ".xapk" || ext == ".apks" || ext == ".apkm" || ext == ".xapks")
+                {
+                    var dlgRes = MessageBox.Show(string.Format("Do you want to INSTALL '{0}' directly on this device?", item.Name), "Install Package", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                    if (dlgRes == DialogResult.Yes)
+                    {
+                        await InstallSelectedRemoteApkAsync();
+                        return;
+                    }
+                    else if (dlgRes == DialogResult.Cancel)
+                    {
+                        return;
+                    }
+                }
+
                 // Offer preview or download
                 var res = MessageBox.Show(string.Format("Preview file '{0}'?", item.Name), "View File", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                 if (res == DialogResult.Yes)
@@ -793,27 +826,165 @@ namespace ADBFileManager
             var pathList = localPaths.Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
             if (pathList.Count == 0) return;
 
-            string serial = currentDeviceSerial;
+            var apkFiles = new List<string>();
+            var normalPaths = new List<string>();
 
-            foreach (string localPath in pathList)
+            foreach (var p in pathList)
             {
-                string itemName = Path.GetFileName(localPath);
-                if (string.IsNullOrEmpty(itemName)) itemName = localPath;
-
-                uploadQueue.Enqueue(new TransferItem
+                if (File.Exists(p))
                 {
-                    LocalPath = localPath,
-                    TargetDir = targetDir,
-                    Serial = serial,
-                    ItemName = itemName
-                });
+                    string ext = Path.GetExtension(p).ToLowerInvariant();
+                    if (ext == ".apk" || ext == ".xapk" || ext == ".apks" || ext == ".apkm" || ext == ".xapks")
+                    {
+                        apkFiles.Add(p);
+                        continue;
+                    }
+                }
+                normalPaths.Add(p);
             }
 
-            queuedTotalCount += pathList.Count;
-            SetProgress(-1, string.Format("Queued {0} item(s) for upload... (Queue: {1})", pathList.Count, uploadQueue.Count));
+            if (apkFiles.Count > 0)
+            {
+                var displayNames = apkFiles.Select(Path.GetFileName).ToList();
+                using (var dlg = new ApkActionDialog(displayNames))
+                {
+                    if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Choice == ApkDropChoice.Cancel)
+                    {
+                        if (normalPaths.Count == 0) return;
+                    }
+                    else if (dlg.Choice == ApkDropChoice.Install)
+                    {
+                        await InstallApkFilesAsync(apkFiles);
+                    }
+                    else if (dlg.Choice == ApkDropChoice.Drop)
+                    {
+                        normalPaths.AddRange(apkFiles);
+                    }
+                }
+            }
 
-            await ProcessUploadQueueAsync();
+            if (normalPaths.Count > 0)
+            {
+                string serial = currentDeviceSerial;
+
+                foreach (string localPath in normalPaths)
+                {
+                    string itemName = Path.GetFileName(localPath);
+                    if (string.IsNullOrEmpty(itemName)) itemName = localPath;
+
+                    uploadQueue.Enqueue(new TransferItem
+                    {
+                        LocalPath = localPath,
+                        TargetDir = targetDir,
+                        Serial = serial,
+                        ItemName = itemName
+                    });
+                }
+
+                queuedTotalCount += normalPaths.Count;
+                SetProgress(-1, string.Format("Queued {0} item(s) for upload... (Queue: {1})", normalPaths.Count, uploadQueue.Count));
+
+                await ProcessUploadQueueAsync();
+            }
         }
+
+        private async Task InstallApkFilesAsync(List<string> apkFiles)
+        {
+            if (string.IsNullOrEmpty(currentDeviceSerial) || apkFiles.Count == 0) return;
+
+            string serial = currentDeviceSerial;
+            int total = apkFiles.Count;
+            int successCount = 0;
+
+            for (int i = 0; i < total; i++)
+            {
+                string localPath = apkFiles[i];
+                string fileName = Path.GetFileName(localPath);
+                int currentIdx = i + 1;
+
+                SetProgress(((i) * 100) / total, string.Format("Installing ({0}/{1}): {2}...", currentIdx, total, fileName));
+
+                var res = await Task.Run(delegate()
+                {
+                    return adbService.InstallPackage(serial, localPath, delegate(int pct, string status)
+                    {
+                        int totalPct = (((i * 100) + pct)) / total;
+                        SetProgress(totalPct, string.Format("Installing ({0}/{1}): {2} - {3}", currentIdx, total, fileName, status));
+                    });
+                });
+
+                if (res.ExitCode == 0)
+                {
+                    successCount++;
+                }
+                else
+                {
+                    MessageBox.Show(string.Format("Failed to install '{0}':\n\n{1}", fileName, string.IsNullOrEmpty(res.Error) ? res.Output : res.Error), "Installation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+
+            SetProgress(-1, string.Format("Successfully installed {0}/{1} package(s)", successCount, total));
+        }
+
+        private async Task InstallSelectedRemoteApkAsync()
+        {
+            if (string.IsNullOrEmpty(currentDeviceSerial) || lstFiles.SelectedItems.Count == 0) return;
+
+            var info = lstFiles.SelectedItems[0].Tag as AdbFileInfo;
+            if (info == null || info.IsDirectory) return;
+
+            string serial = currentDeviceSerial;
+            string ext = Path.GetExtension(info.Name).ToLowerInvariant();
+
+            SetProgress(10, string.Format("Preparing installation for '{0}'...", info.Name));
+
+            // Fast path for standard .apk files already located on device storage
+            if (ext == ".apk")
+            {
+                SetProgress(30, string.Format("Installing '{0}' directly on device...", info.Name));
+                var pmRes = await Task.Run(delegate()
+                {
+                    string cleanRemotePath = AdbService.NormalizePath(info.FullPath).Replace("'", "'\\''");
+                    return adbService.RunAdbCommand(string.Format("-s \"{0}\" shell \"pm install -r '{1}'\"", serial, cleanRemotePath));
+                });
+
+                if (pmRes.ExitCode == 0 && !string.IsNullOrEmpty(pmRes.Output) &&
+                    (pmRes.Output.Contains("Success") || pmRes.Output.Contains("Streaming installed")) &&
+                    !pmRes.Output.Contains("Failure") && (pmRes.Error == null || !pmRes.Error.Contains("Failure")))
+                {
+                    SetProgress(-1, string.Format("Successfully installed '{0}' on device!", info.Name));
+                    return;
+                }
+            }
+
+            // Fallback for package archives (.xapk, .apks, .apkm, .xapks) or if pm install returned errors
+            string tempFile = Path.Combine(Path.GetTempPath(), info.Name);
+
+            try
+            {
+                SetProgress(0, string.Format("Downloading '{0}' for package extraction and installation...", info.Name));
+                var pullRes = await Task.Run(delegate()
+                {
+                    return adbService.Pull(serial, info.FullPath, tempFile, delegate(int pct, string status)
+                    {
+                        SetProgress(pct / 2, string.Format("Downloading '{0}' [{1}%]...", info.Name, pct));
+                    });
+                });
+
+                if (pullRes.ExitCode != 0)
+                {
+                    MessageBox.Show(string.Format("Failed to download '{0}':\n{1}", info.Name, pullRes.Error), "Download Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                await InstallApkFilesAsync(new List<string> { tempFile });
+            }
+            finally
+            {
+                try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
+            }
+        }
+
 
         private async Task ProcessUploadQueueAsync()
         {

@@ -5,7 +5,7 @@ if not exist "%CSC%" (
 )
 
 echo Compiling ADB File Manager UI using built-in Windows C# compiler...
-"%CSC%" /nologo /win32icon:icon.ico /target:winexe /out:ADBFileManager.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Core.dll Program.cs AdbService.cs MainForm.cs FileViewerForm.cs ConflictDialog.cs
+"%CSC%" /nologo /win32icon:icon.ico /target:winexe /out:ADBFileManager.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Core.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll Program.cs AdbService.cs MainForm.cs FileViewerForm.cs ConflictDialog.cs ApkActionDialog.cs
 
 if %ERRORLEVEL% EQU 0 (
     echo.
