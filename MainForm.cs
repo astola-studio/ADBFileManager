@@ -8,6 +8,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using ADBFileManager.Scripting;
 
 namespace ADBFileManager
 {
@@ -84,9 +85,23 @@ namespace ADBFileManager
         private ContextMenuStrip contextMenuFiles;
         private ImageList imageListSmall;
 
+        private ScriptManager scriptManager;
+        private ToolStripDropDownButton menuScripts;
+        private string scriptsFolder;
+
         public MainForm()
         {
             adbService = new AdbService();
+            scriptsFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "scripts");
+            scriptManager = new ScriptManager(
+                adbService,
+                () => currentDeviceSerial,
+                () => currentPath,
+                () => GetSelectedFilesList(),
+                () => { var t = LoadCurrentDirectoryAsync(); }
+            );
+
+
             InitializeComponent();
             SetupIcons();
             
@@ -158,8 +173,18 @@ namespace ADBFileManager
             btnDelete = new ToolStripButton("Delete", null, async (s, e) => await DeleteSelectedAsync()) { DisplayStyle = ToolStripItemDisplayStyle.ImageAndText };
             btnViewFile = new ToolStripButton("Preview File", null, async (s, e) => await PreviewSelectedFileAsync()) { DisplayStyle = ToolStripItemDisplayStyle.ImageAndText };
 
-            var lblFilter = new ToolStripLabel(" Filter: ") { Alignment = ToolStripItemAlignment.Right };
-            txtFilter = new ToolStripTextBox { Width = 130, Alignment = ToolStripItemAlignment.Right };
+            var lblFilter = new ToolStripLabel(" 🔍 Filter: ") { Alignment = ToolStripItemAlignment.Right, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
+            txtFilter = new ToolStripTextBox
+            {
+                Width = 160,
+                Alignment = ToolStripItemAlignment.Right,
+                BorderStyle = BorderStyle.FixedSingle,
+                ToolTipText = "Type to filter files by name or extension..."
+            };
+            txtFilter.TextBox.BackColor = Color.FromArgb(240, 243, 248);
+            txtFilter.TextBox.ForeColor = Color.FromArgb(30, 30, 30);
+            txtFilter.TextBox.Enter += (s, e) => { txtFilter.TextBox.BackColor = Color.LightYellow; };
+            txtFilter.TextBox.Leave += (s, e) => { txtFilter.TextBox.BackColor = Color.FromArgb(240, 243, 248); };
             txtFilter.TextChanged += (s, e) => ApplyFilter();
 
             toolStripActions.Items.Add(btnUploadFile);
@@ -176,6 +201,10 @@ namespace ADBFileManager
             toolStripActions.Items.Add(btnDelete);
             toolStripActions.Items.Add(txtFilter);
             toolStripActions.Items.Add(lblFilter);
+
+            menuScripts = new ToolStripDropDownButton("📜 Scripts") { DisplayStyle = ToolStripItemDisplayStyle.ImageAndText };
+            toolStripActions.Items.Add(new ToolStripSeparator());
+            toolStripActions.Items.Add(menuScripts);
 
             // 4. Main Split Container (Sidebar + File List)
             splitContainer = new SplitContainer
@@ -324,6 +353,72 @@ namespace ADBFileManager
                     }
                 }
                 menuInstallApk.Visible = isApkSelected;
+
+                // Clear previous script menu items
+                for (int i = contextMenuFiles.Items.Count - 1; i >= 0; i--)
+                {
+                    if (contextMenuFiles.Items[i].Tag as string == "ScriptItem")
+                    {
+                        contextMenuFiles.Items.RemoveAt(i);
+                    }
+                }
+
+                // Inject Script Context Menu items
+                if (scriptManager != null && scriptManager.ContextMenuItems.Count > 0)
+                {
+                    var selectedFiles = GetSelectedFilesList();
+                    bool hasSel = selectedFiles.Count > 0;
+                    bool allDirs = hasSel && selectedFiles.All(f => f.IsDirectory);
+
+                    bool addedSeparator = false;
+                    foreach (var scriptMenu in scriptManager.ContextMenuItems)
+                    {
+                        if (scriptMenu.FoldersOnly && !allDirs) continue;
+
+                        if (!string.IsNullOrEmpty(scriptMenu.FileExtensionFilter))
+                        {
+                            if (!hasSel) continue;
+                            string filterExt = scriptMenu.FileExtensionFilter.StartsWith(".") ? scriptMenu.FileExtensionFilter.ToLower() : "." + scriptMenu.FileExtensionFilter.ToLower();
+                            bool matches = selectedFiles.All(f => !f.IsDirectory && Path.GetExtension(f.Name).ToLower() == filterExt);
+                            if (!matches) continue;
+                        }
+
+                        if (!string.IsNullOrEmpty(scriptMenu.FileNameFilter))
+                        {
+                            if (!hasSel) continue;
+                            bool matches = selectedFiles.All(f => ScriptManager.MatchesWildcard(f.Name, scriptMenu.FileNameFilter));
+                            if (!matches) continue;
+                        }
+
+                        if (!string.IsNullOrEmpty(scriptMenu.PathFilter))
+                        {
+                            bool matches = ScriptManager.MatchesWildcard(currentPath, scriptMenu.PathFilter) ||
+                                           (hasSel && selectedFiles.All(f => ScriptManager.MatchesWildcard(f.FullPath, scriptMenu.PathFilter)));
+                            if (!matches) continue;
+                        }
+
+                        if (!addedSeparator)
+                        {
+                            var sep = new ToolStripSeparator { Tag = "ScriptItem" };
+                            contextMenuFiles.Items.Add(sep);
+                            addedSeparator = true;
+                        }
+
+                        var item = new ToolStripMenuItem(scriptMenu.Title, null, (sender, args) =>
+                        {
+                            try
+                            {
+                                scriptMenu.Action(GetSelectedFilesList());
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show("Script Error: " + ex.Message, "Script Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        })
+                        { Tag = "ScriptItem" };
+                        contextMenuFiles.Items.Add(item);
+                    }
+                }
             };
 
             lstFiles.ContextMenuStrip = contextMenuFiles;
@@ -418,7 +513,79 @@ namespace ADBFileManager
 
         private async void MainForm_Load(object sender, EventArgs e)
         {
+            ReloadScripts();
             await RefreshDevicesAsync();
+        }
+
+        private void ReloadScripts()
+        {
+            if (scriptManager != null)
+            {
+                scriptManager.LoadScripts(scriptsFolder);
+                RefreshScriptsMenu();
+            }
+        }
+
+        private void RefreshScriptsMenu()
+        {
+            if (menuScripts == null) return;
+            menuScripts.DropDownItems.Clear();
+
+            var menuManager = new ToolStripMenuItem("Script Manager...", null, (s, e) =>
+            {
+                using (var dlg = new ScriptManagerForm(scriptManager, scriptsFolder, () => ReloadScripts()))
+                {
+                    dlg.ShowDialog();
+                }
+            });
+            var menuReload = new ToolStripMenuItem("Reload Scripts", null, (s, e) => ReloadScripts());
+            var menuOpenFolder = new ToolStripMenuItem("Open Scripts Folder", null, (s, e) =>
+            {
+                try
+                {
+                    if (!Directory.Exists(scriptsFolder)) Directory.CreateDirectory(scriptsFolder);
+                    System.Diagnostics.Process.Start("explorer.exe", scriptsFolder);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Error opening folder: " + ex.Message);
+                }
+            });
+
+            menuScripts.DropDownItems.Add(menuManager);
+            menuScripts.DropDownItems.Add(menuReload);
+            menuScripts.DropDownItems.Add(menuOpenFolder);
+
+            if (scriptManager.ToolsMenuItems.Count > 0)
+            {
+                menuScripts.DropDownItems.Add(new ToolStripSeparator());
+                foreach (var item in scriptManager.ToolsMenuItems)
+                {
+                    var menuItem = new ToolStripMenuItem(item.Title, null, (s, e) =>
+                    {
+                        try
+                        {
+                            item.Action();
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show("Script Error: " + ex.Message, "Script Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    });
+                    menuScripts.DropDownItems.Add(menuItem);
+                }
+            }
+        }
+
+        private List<AdbFileInfo> GetSelectedFilesList()
+        {
+            var list = new List<AdbFileInfo>();
+            foreach (ListViewItem item in lstFiles.SelectedItems)
+            {
+                var info = item.Tag as AdbFileInfo;
+                if (info != null) list.Add(info);
+            }
+            return list;
         }
 
         private async Task RefreshDevicesAsync()

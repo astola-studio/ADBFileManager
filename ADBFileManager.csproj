@@ -15,14 +15,19 @@
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="AdbService.cs" />
+    <Compile Include="ScriptEngine.cs" />
+    <Compile Include="PromptDialog.cs" />
+    <Compile Include="ScriptManagerForm.cs" />
     <Compile Include="MainForm.cs" />
     <Compile Include="FileViewerForm.cs" />
     <Compile Include="ConflictDialog.cs" />
     <Compile Include="ApkActionDialog.cs" />
   </ItemGroup>
+
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
